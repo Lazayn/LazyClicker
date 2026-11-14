@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">LazyClicker</string>
+    <string name="a11y_service_label">LazyClicker · 备用点击</string>
+    <string name="a11y_service_desc">没有 Shizuku 时，用于在固定坐标输出点击手势（备用通道）。不读取任何界面内容。</string>
+</resources>
