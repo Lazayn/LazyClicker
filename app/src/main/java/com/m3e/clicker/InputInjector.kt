@@ -12,7 +12,7 @@ import java.lang.reflect.Method
  * 注入能力：
  *  1) **输出键值**：构造 KeyEvent(DOWN/UP) 注入。Android 里鼠标按键没有对应 keyCode，
  *     所以"输出键值"必须走 KeyEvent —— 这也是 KeyMapper 的做法（它只检测左键，不做左侧注入）。
- *  2) 输出鼠标左键：MotionEvent + buttonState=BUTTON_PRIMARY（坐标必填）。
+ *  2) 输出鼠标按键：MotionEvent + buttonState=BUTTON_PRIMARY / BUTTON_SECONDARY（坐标必填）。
  *
  * 注入逻辑运行在 shell(uid 2000) 的 UserService 里，不受非 SDK 接口限制，
  * 优先使用静态的 `InputManagerGlobal#getInstance()`（Android 15 上 `InputManager#getInstance()`
@@ -189,11 +189,11 @@ class InputInjector {
         }
     }
 
-    // ------------------------------------------------------------ 输出鼠标左键
+    // ------------------------------------------------------------ 输出鼠标按键
 
-    fun click(x: Float, y: Float, touchCompat: Boolean): Boolean {
+    fun click(x: Float, y: Float, touchCompat: Boolean, secondary: Boolean = false): Boolean {
         if (!available) return false
-        return if (touchCompat || !mouseReady) clickAsTouch(x, y) else clickAsMouse(x, y)
+        return if (touchCompat || !mouseReady) clickAsTouch(x, y) else clickAsMouse(x, y, secondary)
     }
 
     fun moveCursor(x: Float, y: Float): Boolean {
@@ -203,14 +203,15 @@ class InputInjector {
         return send(ev)
     }
 
-    private fun clickAsMouse(x: Float, y: Float): Boolean {
+    private fun clickAsMouse(x: Float, y: Float, secondary: Boolean = false): Boolean {
+        val button = if (secondary) MotionEvent.BUTTON_SECONDARY else MotionEvent.BUTTON_PRIMARY
         val downTime = SystemClock.uptimeMillis()
         val down = buildMouse(
             downTime, MotionEvent.ACTION_DOWN, x, y,
-            MotionEvent.BUTTON_PRIMARY, MotionEvent.BUTTON_PRIMARY
+            button, button
         )
         val up = buildMouse(
-            downTime, MotionEvent.ACTION_UP, x, y, 0, MotionEvent.BUTTON_PRIMARY
+            downTime, MotionEvent.ACTION_UP, x, y, 0, button
         )
         if (down == null || up == null) {
             error = "鼠标事件构造失败（带 buttonState 的 obtain 不可用）"

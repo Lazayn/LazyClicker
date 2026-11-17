@@ -56,8 +56,13 @@ data class ServiceStatus(
     val pressed: Boolean = false,
     val inject: Boolean = false,
     val injectMode: String = "none",
-    val outputMode: String = "key",
-    val keyCode: Int = 66,
+    val enabled: Boolean = true,
+    val switchSeq: Int = 0,
+    val toggleKey: Int = -1,
+    val capturing: Boolean = false,
+    val capturedKey: Int = -1,
+    val method: String = "default",
+    val dcLocked: Boolean = false,
     val injectImpl: String = "",
     val injectError: String = "",
     val minCps: Int = 8,
@@ -77,6 +82,17 @@ data class ServiceStatus(
     val lastKey: String = "",
     val measuredCps: Int = 0,
     val pressedDevice: String = "",
+    val dcCps: Int = 60,
+    /** DC 持续时间区间（100..5000 ms） */
+    val dcDurMinMs: Int = 800,
+    val dcDurMaxMs: Int = 1500,
+    val multiMin: Int = 20,
+    val multiMax: Int = 40,
+    val doublePct: Int = 60,
+    val triplePct: Int = 20,
+    val quadPct: Int = 10,
+    val gapMin: Int = 2,
+    val gapMax: Int = 4,
 ) {
     companion object {
         fun parse(raw: String?): ServiceStatus {
@@ -116,8 +132,13 @@ data class ServiceStatus(
                     pressed = json.optBoolean("pressed", false),
                     inject = json.optBoolean("inject", false),
                     injectMode = json.optString("injectMode", "none"),
-                    outputMode = json.optString("outputMode", "key"),
-                    keyCode = json.optInt("keyCode", 66),
+                    enabled = json.optBoolean("enabled", true),
+                    switchSeq = json.optInt("switchSeq", 0),
+                    toggleKey = json.optInt("toggleKey", -1),
+                    capturing = json.optBoolean("capturing", false),
+                    capturedKey = json.optInt("capturedKey", -1),
+                    method = json.optString("method", "default"),
+                    dcLocked = json.optBoolean("dcLocked", false),
                     injectImpl = json.optString("injectImpl", ""),
                     injectError = json.optString("injectError", ""),
                     minCps = json.optInt("minCps", 8),
@@ -136,6 +157,16 @@ data class ServiceStatus(
                     lastKey = json.optString("lastKey", ""),
                     measuredCps = json.optInt("measuredCps", 0),
                     pressedDevice = json.optString("pressedDevice", ""),
+                    dcCps = json.optInt("dcCps", 60),
+                    dcDurMinMs = json.optInt("dcDurMinMs", 800),
+                    dcDurMaxMs = json.optInt("dcDurMaxMs", 1500),
+                    multiMin = json.optInt("multiMin", 20),
+                    multiMax = json.optInt("multiMax", 40),
+                    doublePct = json.optInt("doublePct", 60),
+                    triplePct = json.optInt("triplePct", 20),
+                    quadPct = json.optInt("quadPct", 10),
+                    gapMin = json.optInt("gapMin", 2),
+                    gapMax = json.optInt("gapMax", 4),
                 )
             } catch (_: Throwable) {
                 ServiceStatus()
@@ -146,19 +177,67 @@ data class ServiceStatus(
 
 /** 界面参数 */
 data class ClickerParams(
+    /** 总开关（界面上的开关，也可由绑定键位切换） */
+    val enabled: Boolean = true,
+    /** 绑定键位（evdev 键码），-1 未绑定 */
+    val toggleKey: Int = -1,
+    /** 左键点击模式：default / dbc / dc */
+    val method: String = "default",
+    /** 左键默认与 DBC 的基础 CPS 区间（DBC 上限更低，由界面限制） */
     val minCps: Int = 8,
     val maxCps: Int = 12,
-    /** key = 输出键值（KeyEvent），mouse = 输出鼠标左键（MotionEvent） */
-    val outputMode: String = "key",
-    val keyCode: Int = 66,
+    /** 多倍点概率区间（0..100） */
+    val multiMin: Int = 20,
+    val multiMax: Int = 40,
+    val doublePct: Int = 60,
+    val triplePct: Int = 20,
+    val quadPct: Int = 10,
+    /** 多倍点间隔区间（0..10 ms） */
+    val gapMin: Int = 2,
+    val gapMax: Int = 4,
+    /** DC 模式 */
+    val dcCps: Int = 60,
+    /** DC 持续时间区间（100..5000 ms） */
+    val dcDurMinMs: Int = 800,
+    val dcDurMaxMs: Int = 1500,
     val followCursor: Boolean = true,
     val fixedX: Int = 540,
     val fixedY: Int = 1200,
     val sensitivity: Float = 1.0f,
     val touchCompat: Boolean = false,
-    /** true = 近似系统指针加速；false = 原始输入（线性） */
     val acceleration: Boolean = true,
 )
+
+/** 参数转成服务端唯一配置入口需要的 JSON */
+fun ClickerParams.toJson(): String {
+    return org.json.JSONObject().apply {
+        put("enabled", enabled)
+        put("toggleKey", toggleKey)
+        put("method", when (method) {
+            "dbc" -> 1
+            "dc" -> 2
+            else -> 0
+        })
+        put("minCps", minCps)
+        put("maxCps", maxCps)
+        put("multiMin", multiMin)
+        put("multiMax", multiMax)
+        put("doublePct", doublePct)
+        put("triplePct", triplePct)
+        put("quadPct", quadPct)
+        put("gapMin", gapMin)
+        put("gapMax", gapMax)
+        put("dcCps", dcCps)
+        put("dcDurMinMs", dcDurMinMs)
+        put("dcDurMaxMs", dcDurMaxMs)
+        put("followCursor", followCursor)
+        put("fixedX", fixedX)
+        put("fixedY", fixedY)
+        put("sensitivity", sensitivity)
+        put("touchCompat", touchCompat)
+        put("acceleration", acceleration)
+    }.toString()
+}
 
 /**
  * App 侧统一管理 Shizuku 授权、UserService 绑定、状态轮询、前台服务与无障碍回退。
@@ -168,7 +247,7 @@ class ClickerBridge private constructor(private val appContext: Context) {
     companion object {
         private const val TAG = "M3E-Bridge"
         private const val REQUEST_CODE = 4001
-        private const val SERVICE_VERSION = 5
+        private const val SERVICE_VERSION = 7
 
         @Volatile
         private var instance: ClickerBridge? = null
@@ -323,39 +402,23 @@ class ClickerBridge private constructor(private val appContext: Context) {
     }
 
     fun applyParams(params: ClickerParams) {
-        send { svc ->
-            svc.configure(
-                params.minCps,
-                params.maxCps,
-                if (params.outputMode == "mouse") 1 else 0,
-                params.keyCode,
-                params.followCursor,
-                params.fixedX,
-                params.fixedY,
-                params.sensitivity,
-                params.touchCompat,
-                params.acceleration
-            )
-        }
+        send { svc -> svc.configureJson(params.toJson()) }
     }
 
     fun startTrigger(params: ClickerParams) {
         send { svc ->
-            svc.configure(
-                params.minCps, params.maxCps,
-                if (params.outputMode == "mouse") 1 else 0,
-                params.keyCode, params.followCursor,
-                params.fixedX, params.fixedY, params.sensitivity, params.touchCompat,
-                params.acceleration
-            )
+            svc.configureJson(params.toJson())
             svc.startMouseTrigger()
         }
         ClickerForegroundService.start(appContext)
     }
 
+    fun beginKeyCapture() = send { it.beginKeyCapture() }
+
+    fun endKeyCapture() = send { it.endKeyCapture() }
+
     fun stopTrigger() {
         send { it.stopMouseTrigger() }
-        ClickerForegroundService.stop(appContext)
     }
 
     fun startManual() = send { it.startManualBurst() }
@@ -483,7 +546,7 @@ class ClickerBridge private constructor(private val appContext: Context) {
                         _state.value = BridgeState.NEED_PERMISSION
                     }
                 }
-                delay(700)
+                delay(250)
             }
         }
     }

@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+app/build/
+.kotlin/
+
+# 本地配置（含 sdk.dir / 机器路径）
+local.properties
+
+# IDE
+.idea/
+*.iml
+captures/
+
+# 签名材料：不要提交
+keystore/
+*.jks
+*.keystore
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.log
+*.tmp

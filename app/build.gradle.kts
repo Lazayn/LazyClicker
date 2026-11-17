@@ -14,8 +14,8 @@ android {
         applicationId = "com.m3e.clicker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.4.0"
+        versionCode = 16
+        versionName = "2.0.2"
     }
 
     signingConfigs {
@@ -31,8 +31,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
-            isShrinkResources = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
@@ -52,7 +56,12 @@ android {
     }
 
     packaging {
-        resources.excludes += setOf("/META-INF/{AL2.0,LGPL2.1}")
+        resources.excludes += setOf(
+            "/META-INF/{AL2.0,LGPL2.1}",
+            "META-INF/*.kotlin_module",
+            "DebugProbesKt.bin",
+            "META-INF/*.version",
+        )
     }
 
     lint {
@@ -83,6 +92,7 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics:$composeUi")
     implementation("androidx.compose.ui:ui-tooling-preview:$composeUi")
     implementation("androidx.compose.foundation:foundation:$composeFoundation")
+    implementation("androidx.compose.material:material-icons-core:1.7.8")
     implementation("androidx.compose.material3:material3:$composeMaterial3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 

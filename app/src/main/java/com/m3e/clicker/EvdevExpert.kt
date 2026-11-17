@@ -55,7 +55,7 @@ data class MouseDevice(
  *
  * 步骤：
  * 1) 枚举：/sys/class/input/eventN/device/capabilities 下的 key/abs/rel 位图 + /proc/bus/input/devices，
- *    找出带 BTN_LEFT（code 272）且不是触摸屏（无 ABS_MT）的设备；
+ *    找出带 BTN_LEFT/BTN_RIGHT 且不是触摸屏（无 ABS_MT）的设备；
  * 2) 读取：FileInputStream 按 `struct input_event` 逐字节解析
  *    （64 位进程 24 字节：timeval 16 + type 2 + code 2 + value 4；32 位 16 字节）；
  * 3) 回退：若某个节点不可读（EACCES），对该节点改用 `getevent -l <path>` 文本流。
@@ -63,6 +63,8 @@ data class MouseDevice(
  * 解析结果只向上回报语义：左键按下/抬起、相对位移、绝对坐标。
  */
 class EvdevExpert(
+    /** 监听的鼠标按键 code：272=左键，273=右键 */
+    private val watchButton: Int = BTN_LEFT,
     private val onPress: (String) -> Unit,
     private val onRelease: () -> Unit,
     private val onRelativeMove: (dx: Int, dy: Int) -> Unit,
@@ -70,6 +72,8 @@ class EvdevExpert(
     private val onDevicesChanged: (List<MouseDevice>) -> Unit,
     private val onError: (String) -> Unit,
     private val onAnyKey: (String) -> Unit = {},
+    /** 原始按键回调：code 为 evdev 键码，value 1=按下 0=抬起 */
+    private val onKeyEvent: (Int, Int) -> Unit = { _, _ -> },
 ) {
     companion object {
         private const val TAG = "M3E-Evdev"
@@ -90,6 +94,7 @@ class EvdevExpert(
         private const val ABS_MT_POSITION_Y = 0x36
 
         private const val BTN_LEFT = 0x110 // 272
+        private const val BTN_RIGHT = 0x111 // 273
     }
 
     private val running = AtomicBoolean(false)
@@ -176,7 +181,7 @@ class EvdevExpert(
                 }
                 if (found.isEmpty()) {
                     if (err == null) {
-                        onError("未找到带左键(BTN_LEFT)的输入设备，请确认鼠标已连接（OTG/蓝牙）")
+                        onError("未找到带鼠标按键的输入设备，请确认鼠标已连接（OTG/蓝牙）")
                     }
                     Thread.sleep(2500)
                     continue
@@ -204,6 +209,33 @@ class EvdevExpert(
             }
         }
     }
+
+    private fun keyCodeOf(name: String): Int {
+        val table = mapOf(
+            "KEY_A" to 30, "KEY_B" to 48, "KEY_C" to 46, "KEY_D" to 32, "KEY_E" to 18,
+            "KEY_F" to 33, "KEY_G" to 34, "KEY_H" to 35, "KEY_I" to 23, "KEY_J" to 36,
+            "KEY_K" to 37, "KEY_L" to 38, "KEY_M" to 50, "KEY_N" to 49, "KEY_O" to 24,
+            "KEY_P" to 25, "KEY_Q" to 16, "KEY_R" to 19, "KEY_S" to 31, "KEY_T" to 20,
+            "KEY_U" to 22, "KEY_V" to 47, "KEY_W" to 17, "KEY_X" to 45, "KEY_Y" to 21,
+            "KEY_Z" to 44,
+            "KEY_1" to 2, "KEY_2" to 3, "KEY_3" to 4, "KEY_4" to 5, "KEY_5" to 6,
+            "KEY_6" to 7, "KEY_7" to 8, "KEY_8" to 9, "KEY_9" to 10, "KEY_0" to 11,
+            "KEY_ESC" to 1, "KEY_TAB" to 15, "KEY_SPACE" to 57, "KEY_ENTER" to 28,
+            "KEY_LEFTSHIFT" to 42, "KEY_RIGHTSHIFT" to 54, "KEY_LEFTCTRL" to 29,
+            "KEY_RIGHTCTRL" to 97, "KEY_LEFTALT" to 56, "KEY_RIGHTALT" to 100,
+            "KEY_CAPSLOCK" to 58, "KEY_GRAVE" to 41, "KEY_MINUS" to 12, "KEY_EQUAL" to 13,
+            "KEY_BACKSLASH" to 43, "KEY_SEMICOLON" to 39, "KEY_APOSTROPHE" to 40,
+            "KEY_COMMA" to 51, "KEY_DOT" to 52, "KEY_SLASH" to 53,
+            "KEY_F1" to 59, "KEY_F2" to 60, "KEY_F3" to 61, "KEY_F4" to 62,
+            "KEY_F5" to 63, "KEY_F6" to 64, "KEY_F7" to 65, "KEY_F8" to 66,
+            "KEY_F9" to 67, "KEY_F10" to 68, "KEY_F11" to 87, "KEY_F12" to 88,
+            "BTN_MIDDLE" to 274, "BTN_SIDE" to 275, "BTN_EXTRA" to 276,
+        )
+        return table[name] ?: -1
+    }
+
+    private fun watchButtonName(): String =
+        if (watchButton == BTN_RIGHT) "BTN_RIGHT" else "BTN_LEFT"
 
     // ---------------------------------------------------------------- 设备枚举
 
@@ -246,7 +278,7 @@ class EvdevExpert(
                 ?: ""
             val handlers = info?.handlers ?: ""
 
-            val hasLeft = bitSet(keyMask, BTN_LEFT)
+            val hasLeft = bitSet(keyMask, BTN_LEFT) || bitSet(keyMask, BTN_RIGHT)
             val isTouch = bitSet(absMask, ABS_MT_SLOT) || bitSet(absMask, ABS_MT_POSITION_X) ||
                 bitSet(absMask, ABS_MT_POSITION_Y)
             val mouseHandler = handlers.contains("mouse")
@@ -476,10 +508,11 @@ class EvdevExpert(
                 val label = "${keyName(code)} ${if (value == 1) "DOWN" else if (value == 0) "UP" else "REPEAT"}"
                 device.lastKey = label
                 onAnyKey("${device.name} · $label")
-                if (code == BTN_LEFT) {
+                onKeyEvent(code, value)
+                if (code == BTN_LEFT || code == BTN_RIGHT) {
                     device.isMouse = true
                 }
-                if (code == BTN_LEFT) {
+                if (code == watchButton) {
                     if (value == 1 && !pressed) {
                         pressed = true
                         pressedDevice = device.path
@@ -559,8 +592,23 @@ class EvdevExpert(
             type == "EV_KEY" -> {
                 device.lastKey = "$code $value"
                 onAnyKey("${device.name} · $code $value")
-                if (code == "BTN_LEFT") {
+                val numeric = when (code) {
+                    "BTN_LEFT" -> 272
+                    "BTN_RIGHT" -> 273
+                    else -> keyCodeOf(code)
+                }
+                if (numeric > 0) {
+                    val v = when (value) {
+                        "DOWN", "1", "00000001" -> 1
+                        "UP", "0", "00000000" -> 0
+                        else -> 2
+                    }
+                    onKeyEvent(numeric, v)
+                }
+                if (code == "BTN_LEFT" || code == "BTN_RIGHT") {
                     device.isMouse = true
+                }
+                if (code == watchButtonName()) {
                     val isDown = value == "DOWN" || value == "1" || value == "00000001"
                     val isUp = value == "UP" || value == "0" || value == "00000000"
                     if (isDown && !pressed) {

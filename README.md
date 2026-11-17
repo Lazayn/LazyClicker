@@ -1,32 +1,89 @@
 # LazyClicker
-> （注：部分内容由豆包 AI 生成）
 
-Android 连点工具。它读取物理鼠标左键的原始输入，按住期间按可调的最小/最大 CPS 重复输出按键事件或鼠标左键。输入检测直接读 `/dev/input`，事件注入通过 Shizuku 的 UserService 以 shell（uid 2000）身份执行，因此 App 本身不需要 root。
+Android 鼠标连点工具。它直读物理鼠标左键的 evdev 输入，按住期间按设定的 CPS 重复输出鼠标左键。注入由 Shizuku 的 UserService 以 shell（uid 2000）身份执行，App 本身不需要 root。
 
 - 应用名：LazyClicker
 - 包名：`com.m3e.clicker`
-- 版本：1.4.0（versionCode 5）
+- 版本：2.0.2（versionCode 16）
 - minSdk 26 / targetSdk 35 / compileSdk 35
 - 界面：Jetpack Compose + Material 3
 
 ---
 
-## 1. 功能范围
+## 1. 功能
 
-| 能力 | 实现方式 |
+| 能力 | 实现 |
 | --- | --- |
-| 鼠标左键检测 | 直读 evdev，解析 `BTN_LEFT` 事件；能力位图读不出时监听全部输入节点，用真实事件反推鼠标 |
-| 按住重复输出 | 服务端循环，间隔取 `1000 / random(minCps, maxCps)`，两次输出之间的节奏按绝对时间对齐 |
-| 输出类型 | 默认 `KeyEvent` 键值（可在常用键、自定义 keyCode、实体键盘扫描三种方式中选择）；可选鼠标左键（`MotionEvent` + `buttonState`） |
-| CPS 范围 | 1–30，可设区间；区间相等即固定频率 |
-| 光标跟随 | 鼠标相对位移换算为系统光标坐标，灵敏度 0–3 倍，可选“速度加速”或“原始输入”模型；也可固定坐标输出 |
-| 运行环境 | 前台服务 + 常驻通知；无 Shizuku 时可退化为无障碍手势，但该通道无法表达鼠标按键 |
-| 自检 | 全屏 TEST 页，每 100 ms 刷新一次实时 CPS，并显示点击位置 |
+| 检测 | evdev 直读 `BTN_LEFT`(272)；能力位图读不出时监听全部节点，靠真实事件反推 |
+| 输出 | `MotionEvent` + `buttonState = BUTTON_PRIMARY` |
+| 模式 | 默认（区间随机 CPS）、DBC（一次基础点击扩展成 2/3/4 连点）、DC（限时高频 burst） |
+| 总开关 | 主界面开关，一键启用或禁用；可用键盘键或鼠标侧键绑定切换 |
+| 横屏 | 设置常驻右侧占 50%，主界面占 50%，不再滑出抽屉；竖屏仍为左侧抽屉 |
+| 前台服务 | 常驻通知，可单独启停 |
+| 无障碍兜底 | 无 Shizuku 时用 `dispatchGesture` 模拟触摸（无法区分左右键） |
+| 自检 | 全屏 TEST，每 20 ms 刷新 CPS；点击在落点复刻 BASpark 的波纹与火花特效 |
 | 语言 | 中文 / English，切换入口在设置页底部 |
 
 ---
 
-## 2. 依赖与工具链
+## 2. 界面
+
+- 主界面顶部是总开关，替代原来的「输出左键」标题；开关下方一行显示当前绑定的键位，点击可重新绑定。
+- 接着是点击模式三选一（默认 / DBC / DC），CPS 与附加参数随模式变化。
+- 页面底部固定一个 TEST 按钮。
+- 竖屏时设置从左侧滑出（遮罩 + 滑入动画）；横屏时设置固定在右半屏，不提供菜单按钮。
+- 设置分组依次为：高级、后台、诊断、关于，最下方是语言切换。
+- 界面不显示常驻的「就绪」状态，也没有右上角状态点。
+- 配色跟随系统深浅色与动态取色，不做固定配色。
+
+### 2.1 开关与键位绑定
+
+开关直接对应服务端的 `enabled` 状态。切换时不销毁监视线程，再次打开无需重新扫描设备；绑定键位由服务进程内的 evdev 读取线程识别，按下沿触发一次切换，抬起与重复事件忽略。
+
+绑定流程：点击「绑定键位」后服务进入捕获模式，捕获下一个键盘按键或鼠标中键/侧键，确认后写入参数并持久化；捕获期间按键不会触发开关。
+
+---
+
+## 3. 三种点击模式
+
+### 3.1 默认（Default）
+
+CPS 区间 1–25，每次输出一次点击。间隔 = `1000 / random(min, max)`，按绝对时间排程（见第 8 节）。
+
+### 3.2 DBC（Double Butterfly Click）
+
+CPS 区间 1–16。基础节奏与默认模式相同，区别在于**每一次基础点击都可能扩展为多次点击**，扩展出来的点击之间只间隔若干毫秒，因此实际输出次数高于设定的基础 CPS。
+
+参数：
+
+| 参数 | 范围 | 说明 |
+| --- | --- | --- |
+| 多倍点概率 | 0–100%，可选区间 | 每次基础点击先按此概率决定是否进入多倍判定 |
+| 二倍 / 三倍 / 四倍点概率 | 各 0–100% | 进入多倍判定后，三个概率各自独立随机 |
+| 多倍点间隔 | 0–10 ms，区间可调 | 一次物理点击扩展出的多次输出之间的间隔，每次在区间内随机取值 |
+
+判定流程：
+
+```
+基础点击 → 按 多倍点概率（区间内随机）判定
+  ├─ 未触发 → 输出 1 次
+  └─ 触发   → 对三个概率分别随机（概率为 0 的直接跳过）
+        ├─ 命中两个及以上 → 在命中的倍数里随机取一个
+        ├─ 恰好命中一个   → 用该倍数
+        └─ 一个都没命中   → 固定输出二倍点
+```
+
+举例：二倍设为 0%，三倍与四倍各 50%，两者都没命中时仍输出二倍点；只有三倍命中则输出三倍点。
+
+### 3.3 DC（Drag Click）
+
+CPS 范围 15–150，另有一个 0.1–5.0 秒的持续时间区间，每一轮在区间内随机取值。
+
+按下左键后开始输出，持续到设定时间结束即停止；此时必须**松开再重新按下**才会开始下一轮，按住不放不会继续。松手会清除锁定。
+
+---
+
+## 4. 依赖与工具链
 
 | 项 | 版本 |
 | --- | --- |
@@ -34,179 +91,126 @@ Android 连点工具。它读取物理鼠标左键的原始输入，按住期间
 | Gradle | 8.9 |
 | Android Gradle Plugin | 8.7.3 |
 | Kotlin | 2.2.20 |
-| Compose BOM / runtime | 1.8.2 / 1.8.1 |
+| Compose runtime / BOM | 1.8.1 / 1.8.2 |
 | material3 | 1.4.0 |
 | Shizuku api / provider | 13.1.5 |
-| compileSdk / targetSdk / minSdk | 35 / 35 / 26 |
 
-Material 3 Expressive 组件（`MaterialExpressiveTheme`、`MotionScheme`、`ButtonGroup`、`FloatingToolbar`）在 material3 1.4.0 中仍为 internal，而 1.5.x 要求 compileSdk 37 与 AGP 9.1.0，因此界面用 1.4.0 的公开 API 自行实现：大字号层级、大圆角、弹簧动效、按下形变、进度柱。
+Material 3 Expressive 组件在 material3 1.4.0 中仍为 internal，1.5.x 需要 compileSdk 37 与 AGP 9.1.0，因此界面使用 1.4.0 的公开 API 自行实现。
 
 ---
 
-## 3. 整体结构
+## 5. 架构与接口
 
 ```
 应用进程  com.m3e.clicker
-├── MainActivity               Compose 入口
-├── ClickerBridge              授权、绑定、状态轮询、参数下发、异常看门狗
-├── ClickerForegroundService   前台服务与常驻通知
-├── ClickerAccessibilityService 无障碍手势（备用通道）
-├── SystemAccess               通知 / 电池优化 / 无障碍的检查与跳转
-└── ui/                        主界面、设置抽屉、TEST 页、键值目录
+├── MainActivity
+├── ClickerBridge            授权、绑定、轮询、参数下发、异常看门狗
+├── ClickerForegroundService 前台服务与常驻通知
+├── ClickerAccessibilityService
+├── SystemAccess
+└── ui/                      主界面、双页、设置、TEST
 
-                    AIDL  IClickerService（service version 5）
+                 AIDL  IClickerService（service version 6）
 
-Shizuku UserService  uid = 2000（shell）
-├── ClickerService             状态机、参数、连点循环
-├── EvdevExpert                /dev/input 枚举与读取
-└── InputInjector              KeyEvent / MotionEvent 注入
+Shizuku UserService  uid = 2000
+├── ClickerService           状态机、模式循环
+├── EvdevExpert              /dev/input 枚举与读取
+└── InputInjector            MotionEvent 注入
 ```
 
-App 不直接持有注入权限，只通过 AIDL 调用服务。服务由 Shizuku 以 `daemon(true)`、`processNameSuffix("clicker")` 启动，进程独立于应用，应用被杀后仍可存活。
+AIDL 方法：
 
-### AIDL 接口
+| 方法 | id |
+| --- | --- |
+| `destroy()` | 16777114 |
+| `configureJson(String)` | 1 |
+| `startMouseTrigger()` / `stopMouseTrigger()` | 2 / 3 |
+| `startManualBurst()` / `stopManualBurst()` | 4 / 5 |
+| `clickOnce()` | 6 |
+| `resetCursor()` | 7 |
+| `ping()` | 8 |
+| `statusJson()` | 9 |
+| `beginKeyCapture()` / `endKeyCapture()` | 10 / 11 |
 
-| 方法 | id | 说明 |
-| --- | --- | --- |
-| `destroy()` | 16777114 | 结束服务进程 |
-| `configure(minCps, maxCps, outputMode, keyCode, followCursor, fixedX, fixedY, sensitivity, touchCompat, acceleration)` | 1 | 下发全部参数 |
-| `startMouseTrigger()` / `stopMouseTrigger()` | 2 / 3 | 开始 / 停止监听鼠标左键 |
-| `startManualBurst()` / `stopManualBurst()` | 4 / 5 | 手动连点，3 秒绝对超时 |
-| `clickOnce()` | 6 | 单次输出 |
-| `resetCursor()` | 7 | 光标归位到屏幕中心 |
-| `ping()` | 8 | 心跳 |
-| `statusJson()` | 9 | 返回完整状态 |
+`configureJson` 字段：
 
-AIDL 的每个方法必须全部分配 id 或全部不分配，混用会导致 `destroy()` 找不到。方法签名一旦变化必须同步提升 `SERVICE_VERSION`，否则 Shizuku 会复用仍然存在的旧服务进程。
+| 字段 | 含义 |
+| --- | --- |
+| `enabled` | 总开关 |
+| `toggleKey` | 绑定键位的 evdev 键码，-1 未绑定 |
+| `method` | 0=默认，1=DBC，2=DC |
+| `minCps` / `maxCps` | 左键基础 CPS 区间 |
+| `multiMin` / `multiMax` | 多倍点概率区间 |
+| `doublePct` / `triplePct` / `quadPct` | 二倍 / 三倍 / 四倍点概率 |
+| `gapMin` / `gapMax` | 多倍点间隔区间 |
+| `dcCps` | DC 的 CPS |
+| `dcDurMinMs` / `dcDurMaxMs` | DC 持续时间区间 |
+| `followCursor` / `fixedX` / `fixedY` | 坐标模式 |
+| `sensitivity` / `acceleration` / `touchCompat` | 光标与注入选项 |
 
----
 
-## 4. 输入检测实现
-
-### 4.1 设备枚举
-
-遍历 `/dev/input/event*`，用 `EVIOCGBIT` 读取 `EV_KEY`、`EV_REL`、`EV_ABS` 能力位图，判断节点是否支持 `BTN_LEFT`(272) 或鼠标类按键；同时读取设备名。
-
-早期版本在能力位图读取失败时会过滤掉全部节点，导致扫描结果为“13 个节点，没有鼠标”。现在的策略是：位图读不到时不做过滤，监听所有节点，靠真实收到的 `BTN_LEFT` 事件把设备标记为鼠标。
-
-### 4.2 事件解析
-
-每个节点用 `FileInputStream` 顺序读取 `struct input_event`，按位宽解析：64 位每事件 24 字节，32 位每事件 16 字节，字段为 `timeval`、`type`、`code`、`value`。只处理三类：
-
-- `EV_KEY` + `BTN_LEFT`：`value=1` 为按下，`0` 为抬起，`2` 为重复；
-- `EV_REL` + `REL_X` / `REL_Y`：鼠标相对位移；
-- `EV_ABS` + `ABS_X` / `ABS_Y`：数位板等绝对坐标设备，按 `ABS_X/ABS_Y` 的信息归一化。
-
-直读失败时回退到 `getevent -l`，解析其文本输出，仅作为兜底。
-
-### 4.3 生命周期
-
-监视线程周期性重新扫描设备列表。按住期间如果当前设备从列表里消失（拔出、断连、休眠），立即触发释放，避免按下状态残留。读取线程退出时同样执行释放。
+AIDL 方法必须全部分配 id 或全部不分配。方法签名变化需同步提升 `SERVICE_VERSION`，否则 Shizuku 会复用旧服务进程。
 
 ---
 
-## 5. 注入实现
+## 6. 输入检测
 
-注入在 UserService 进程内完成。`InputManager#getInstance()` 在该进程不可用：它内部依赖 `ActivityThread.currentApplication()`，而服务进程没有 Application 实例，调用必然 NPE。可用的是 `InputManagerGlobal#getInstance()`，它通过 `ServiceManager.getService("input")` 取 Binder，`injectInputEvent(event, mode)` 的 mode 传 2（`WAIT_FOR_FINISH`）。
-
-### 5.1 键值
-
-用 `KeyEvent(downTime, eventTime, action, code, repeat)` 构造 DOWN / UP 两个事件依次注入。Android 没有表示鼠标按键的 keyCode，这是默认输出键值模式的原因。
-
-### 5.2 鼠标左键
-
-`MotionEvent` 需要一个带 `buttonState` 的构造路径。使用隐藏的 pointer-based `obtain` 重载，配合 `PointerProperties` / `PointerCoords` 数组，按下时 `actionButton = BUTTON_PRIMARY`、`buttonState = BUTTON_PRIMARY`，抬起时 `buttonState = 0`。
-
-取数组类型时不能用 `Class.forName("android.view.MotionEvent$PointerProperties[]")`，这是非法 JVM 类名，会抛 `ClassNotFoundException: Invalid name`，早期版本因此把整条注入通道标记为不可用。正确做法是 `Array.newInstance(Class.forName("android.view.MotionEvent$PointerProperties"), 0).javaClass`。该步骤失败现在只降级鼠标模式，不影响键值注入。
-
-### 5.3 坐标
-
-`REL` 设备没有绝对坐标，服务启动触发时先把系统光标移到屏幕中心，使内部推算坐标与真实光标对齐，之后按增量累加并裁剪到屏幕范围。
-
-Android 的光标本身带系统级加速，不是 1:1 的原始输入，所以换算提供两种模型：
-
-- 原始输入：`out = delta × sensitivity`；
-- 速度加速：`gain = 1 + min(|delta|, 20) × 0.09`，`out = delta × gain × sensitivity`，大位移获得更高倍率，近似系统加速曲线。
-
-`sensitivity` 取值 0–3，为 0 时相对位移不产生任何移动。
+1. 遍历 `/dev/input/event*`，读取 `EVIOCGBIT` 能力位图与设备名，排除带 `ABS_MT` 的触摸屏。
+2. 逐字节解析 `struct input_event`：64 位每事件 24 字节，32 位 16 字节，字段为 `timeval`、`type`、`code`、`value`。
+3. 只处理三个按键码 `BTN_LEFT` / `BTN_RIGHT` 的按下与抬起，以及 `EV_REL` 的 `REL_X` / `REL_Y`、`EV_ABS` 的绝对坐标。
+4. 位图读不出时不做过滤，监听全部节点，靠真实按键事件确认设备类型。
+5. 直读失败时回退到 `getevent -l`。
+6. 按住期间设备从列表消失（拔出、断连）立即释放；读取线程结束同样释放。
 
 ---
 
-## 6. 连点循环
+## 7. 注入
+
+- `InputManager#getInstance()` 在 UserService 进程不可用：内部依赖 `ActivityThread.currentApplication()`，服务进程没有 Application 实例。使用 `InputManagerGlobal#getInstance()`，`injectInputEvent(event, 2)`。
+- 输出鼠标按键使用带 `buttonState` 的隐藏 `obtain` 重载，配 `PointerProperties` / `PointerCoords` 数组；按下时 `actionButton` 与 `buttonState` 均为对应键，抬起时 `buttonState=0`。
+- 数组 Class 用 `Array.newInstance(Class.forName("android.view.MotionEvent$PointerProperties"), 0).javaClass`，不能写 `Class.forName("...$PointerProperties[]")`（非法 JVM 类名）。
+- 坐标：`REL` 设备没有绝对位置，启动监听时先把系统光标移到屏幕中心，之后按增量累加并裁剪到屏幕。
+- 相对位移换算：原始输入为 `delta × sensitivity`；速度加速为 `delta × (1 + min(|delta|,20) × 0.09) × sensitivity`。`sensitivity` 取 0–3，为 0 时不移动光标。
+
+---
+
+## 8. 连点循环
 
 ```
-loopStart = now
-nextAt = loopStart
+start = now
+nextAt = start
 while clicking && shouldKeepClicking():
-    if now - loopStart > 120s: 停止
-    outputOnce()
-    统计最近 1 秒输出次数 → measuredCps
-    nextAt += 1000 / cps
+    if now - start > 120s: 停止
+    按当前模式输出 1 次或多次
+    nextAt += interval
     若 nextAt <= now: nextAt = now + 1
     sleep(nextAt - now)
 ```
 
-要点：
-
-1. **绝对时间排程**。早期写法是“注入完成后 sleep(1000/cps)”，注入本身（两个事件 + `WAIT_FOR_FINISH`）的耗时被叠加进周期，设定 30 时实测只有 21–22。改成按目标时间戳推进后，注入耗时不累积，实际速率贴近设定值。
-2. **CPS 取整**。`interval = 1000 / cps` 向下取整并至少 1 ms，min 与 max 顺序无关。
-3. **真实速率上报**。服务端用 1 秒滑动窗口记录每次输出的时间戳，`measuredCps` 随 `statusJson` 返回，界面和 TEST 显示的都是实际输出次数，不是配置值。
-
-### 6.1 触发条件
-
-开始连点只有两个入口：真实的 `BTN_LEFT` 按下，以及显式的手动连点调用。`shouldKeepClicking()` 的判定是：手动模式且未超过绝对 deadline，或者 `triggerEnabled && mousePressed`。
-
-1.4.0 修掉的一个问题是手动状态无法结束：心跳 `ping()` 每次轮询都会把 manual deadline 往后推，而判定只看 `manualActive`，于是界面持续轮询就等于无限续命；叠加 daemon 服务跨应用重启存活、鼠标拔出后按下标志卡住，表现为“进入应用、没连鼠标、没点开始也在一直连点”。当前的处理：
-
-- 心跳不再续期任何计时；
-- 手动连点改为 3 秒绝对超时；
-- 绑定成功后先清除一次服务里残留的 trigger / manual 状态；
-- 按住期间设备消失立即释放；
-- 单次按住超过 120 秒强制停止；
-- 应用侧看门狗：`clicking` 为真但 `trigger` 与 `manual` 都为假，连续两次轮询后强制停止。
+- 间隔按目标时间戳推进，注入耗时（每次两个事件 + `WAIT_FOR_FINISH`）不累积到周期。
+- 服务端用 1 秒滑动窗口统计真实输出次数，`measuredCps` 随状态返回。
+- 触发条件：`enabled && mousePressed`；关闭开关只停止循环，监视线程保留。
+- 单次按住最长 120 秒，超时自动停止；DC 另有自身持续时间。
+- 心跳 `ping()` 不续期任何计时。
+- 应用侧看门狗：`clicking` 为真但 `trigger`、`manual` 都为假，连续两次轮询后强制停止。
 
 ---
 
-## 7. 后台运行
+## 9. 后台运行
 
 `ClickerForegroundService` 以前台服务类型 `specialUse` 常驻，通知带停止动作。设置页可跳转通知权限、电池优化白名单、无障碍开关。
 
-`ClickerAccessibilityService` 通过 `dispatchGesture` 提供备用点击通道，用于 Shizuku 不可用的场景；该通道只能模拟屏幕触摸，无法表达鼠标按键。
+`ClickerAccessibilityService` 通过 `dispatchGesture` 提供备用点击通道，只能模拟屏幕触摸，无法表达鼠标按键。
 
 ---
 
-## 8. 界面
+## 10. 状态字段
 
-- **主界面**：左上角菜单、应用名、状态点；`输出`（键值 / 左键 + 当前键值按钮）、CPS 大字与区间滑块、状态行、开始 / 停止按钮、TEST 按钮。
-- **设置**：从左侧滑出，含“高级”（灵敏度、加速 / 原始、触摸兼容、跟随 / 固定坐标）、“后台”（Shizuku 入口、通知、电池、无障碍、前台服务）、“诊断”（注入实现、输出类型、最后输入、光标、错误、节点列表）、“关于”（使用的代码与 GitHub 链接）；最下方是中英文切换。
-- **TEST**：全屏页，每 100 ms 刷新一次 CPS，显示点击位置，20 格历史柱，左上角退出。未连接 Shizuku 时测量手动点击速率，连接且正在连点时显示服务端真实输出速率。
-
-界面文案为内嵌中英双语，通过 `CompositionLocal` 传递当前语言，状态持久化在 `lazy_clicker_prefs`，切换即时生效。
+`statusJson()` 返回：`ready`、`uid`、`trigger`、`clicking`、`manual`、`pressed`、`enabled`、`switchSeq`、`toggleKey`、`capturing`、`capturedKey`、`method`、`dcLocked`、`inject`、`injectMode`、`injectImpl`、`injectError`、`minCps`、`maxCps`、`dcCps`、`dcDurMinMs`、`dcDurMaxMs`、`multiMin`、`multiMax`、`doublePct`、`triplePct`、`quadPct`、`gapMin`、`gapMax`、`cursorX`、`cursorY`、`width`、`height`、`followCursor`、`sensitivity`、`acceleration`、`clicks`、`measuredCps`、`pressedDevice`、`lastKey`、`devices`、`nodeDetails`、`scanError`、`err`。
 
 ---
 
-## 9. 状态字段
-
-`statusJson()` 返回的字段：
-
-| 字段 | 含义 |
-| --- | --- |
-| `ready` | 服务是否就绪 |
-| `uid` | 服务进程 uid，正常为 2000 |
-| `trigger` / `clicking` / `manual` / `pressed` | 监听中 / 正在连点 / 手动模式 / 左键按下 |
-| `inject` / `injectMode` / `injectImpl` | 注入是否可用 / 当前注入模式 / 使用的管理器 |
-| `outputMode` / `keyCode` | 输出类型与键值 |
-| `minCps` / `maxCps` | 当前频率区间 |
-| `cursorX` / `cursorY` / `width` / `height` | 推算光标位置与屏幕尺寸 |
-| `followCursor` / `sensitivity` / `acceleration` | 坐标模型参数 |
-| `clicks` / `measuredCps` | 累计输出次数 / 最近 1 秒真实速率 |
-| `pressedDevice` | 当前按下的设备路径 |
-| `devices` / `nodeDetails` / `scanError` | 设备列表、节点明细、扫描错误 |
-| `err` | 最近一次错误 |
-
----
-
-## 10. 构建
+## 11. 构建
 
 ```bash
 export JAVA_HOME=/path/to/jdk-17
@@ -215,23 +219,23 @@ export ANDROID_HOME=/path/to/android-sdk
 gradle :app:assembleRelease
 ```
 
-产物位于 `app/build/outputs/apk/release/app-release.apk`。
+产物：`app/build/outputs/apk/release/app-release.apk`。
 
-签名配置在 `app/build.gradle.kts` 中指向 `keystore/m3e.jks`，该文件不随仓库分发。发布构建关闭了 `lintVitalAnalyzeRelease`（`lint { checkReleaseBuilds = false; abortOnError = false }`），因为在当前工具链下该任务会崩溃。
-
----
-
-## 11. 已知限制
-
-- 必须有运行中的 Shizuku；没有 Shizuku 时只能使用无障碍手势，无法输出鼠标按键。
-- Android 输入模型没有鼠标按键的 keyCode，输出键值模式实际上输出的是普通按键。
-- `REL` 设备没有绝对坐标，光标位置是推算值；系统指针加速与实现中的加速模型只能近似匹配。
-- 不同 ROM 对 `injectInputEvent` 的响应不同，部分系统需要开启“触摸兼容”。
-- 部分设备的能力位图不可读，此时依赖真实事件反推设备类型。
+发布构建关闭了 `lintVitalAnalyzeRelease`（`lint { checkReleaseBuilds = false; abortOnError = false }`）。
 
 ---
 
-## 12. 目录结构
+## 12. 已知限制
+
+- 必须运行 Shizuku；无 Shizuku 时只能用无障碍手势，无法区分左右键。
+- `REL` 设备的光标位置是推算值，系统的指针加速只能近似匹配。
+- 部分 ROM 对 `injectInputEvent` 响应不同，需要开启触摸兼容。
+- 部分设备的能力位图不可读，依赖真实事件反推设备类型。
+- 触摸兼容模式输出的是触摸事件，多倍点可能被系统合并。
+
+---
+
+## 13. 目录结构
 
 ```
 M3EClicker/
@@ -250,7 +254,6 @@ M3EClicker/
 │   │   └── ui/
 │   │       ├── Theme.kt
 │   │       ├── ClickerScreen.kt
-│   │       ├── KeyCatalog.kt
 │   │       └── Lang.kt
 │   ├── res/mipmap-*/ic_launcher.png
 │   ├── res/mipmap-*/ic_launcher_round.png
@@ -262,7 +265,7 @@ M3EClicker/
 
 ---
 
-## 13. 参考
+## 14. 参考
 
 - Shizuku API：<https://github.com/RikkaApps/Shizuku-API>
 - KeyMapper：<https://github.com/keymapperorg/KeyMapper>
@@ -272,6 +275,6 @@ M3EClicker/
 
 ---
 
-## 14. 声明
+## 15. 声明
 
 本项目仅用于自动化测试、辅助操作等合法场景。使用者需自行确保使用行为符合目标应用的服务条款与当地法律。
