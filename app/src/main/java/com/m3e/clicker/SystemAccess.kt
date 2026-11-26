@@ -1,8 +1,6 @@
 package com.m3e.clicker
 
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.Activity
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -10,7 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
-import android.view.accessibility.AccessibilityManager
 
 /** 后台运行相关的系统能力检查 / 跳转（通知、电池优化、无障碍） */
 object SystemAccess {
@@ -67,30 +64,6 @@ object SystemAccess {
     }
 
     /** 无障碍服务是否已启用（通过系统已启用列表判断，不依赖服务进程是否已连上） */
-    fun isAccessibilityEnabled(context: Context): Boolean {
-        val component = ComponentName(context, ClickerAccessibilityService::class.java)
-        return try {
-            val manager = context.getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
-            val enabled = manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-            enabled.any { info ->
-                val serviceInfo = info.resolveInfo?.serviceInfo ?: return@any false
-                ComponentName(serviceInfo.packageName, serviceInfo.name) == component
-            }
-        } catch (_: Throwable) {
-            ClickerAccessibilityService.isConnected()
-        }
-    }
-
-    fun openAccessibilitySettings(context: Context) {
-        try {
-            context.startActivity(
-                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        } catch (_: Throwable) {
-        }
-    }
-
     fun openAppDetails(context: Context) {
         try {
             context.startActivity(
@@ -103,4 +76,51 @@ object SystemAccess {
     }
 
     const val REQUEST_NOTIFICATIONS = 4201
+
+    /** 是否已获得「显示在其他应用上层」 */
+    fun canDrawOverlays(context: Context): Boolean = try {
+        Settings.canDrawOverlays(context)
+    } catch (_: Throwable) {
+        false
+    }
+
+    /**
+     * 借 Shizuku（shell 身份）直接放行 SYSTEM_ALERT_WINDOW，避免跳系统页。
+     * 失败返回 false，由调用方退回系统授权页。
+     */
+    fun grantOverlayByShizuku(context: Context): Boolean {
+        return try {
+            if (!rikka.shizuku.Shizuku.pingBinder()) return false
+            if (rikka.shizuku.Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) return false
+            // Shizuku 13 起 newProcess 为私有，走反射调用同一实现
+            val method = rikka.shizuku.Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java,
+            )
+            method.isAccessible = true
+            val process = method.invoke(
+                null,
+                arrayOf("appops", "set", context.packageName, "SYSTEM_ALERT_WINDOW", "allow"),
+                null,
+                null,
+            ) as Process
+            process.waitFor()
+            Settings.canDrawOverlays(context)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    fun openOverlaySettings(context: Context) {
+        try {
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                    .setData(Uri.parse("package:${context.packageName}"))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (_: Throwable) {
+        }
+    }
 }

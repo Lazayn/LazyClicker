@@ -279,6 +279,8 @@ class EvdevExpert(
             val handlers = info?.handlers ?: ""
 
             val hasLeft = bitSet(keyMask, BTN_LEFT) || bitSet(keyMask, BTN_RIGHT)
+            // 键盘节点的 key 位图里有字母键，说明是真键盘；不带上就永远收不到绑定的键盘键
+            val hasKeyboard = bitSet(keyMask, 30) || bitSet(keyMask, 32) || bitSet(keyMask, 46)
             val isTouch = bitSet(absMask, ABS_MT_SLOT) || bitSet(absMask, ABS_MT_POSITION_X) ||
                 bitSet(absMask, ABS_MT_POSITION_Y)
             val mouseHandler = handlers.contains("mouse")
@@ -286,7 +288,7 @@ class EvdevExpert(
 
             // 触摸屏 / 虚拟触摸设备排除；其余只要像鼠标或确实有 BTN_LEFT 就监听
             if (isTouch) continue
-            val candidate = hasLeft || mouseHandler || hasRel
+            val candidate = hasLeft || mouseHandler || hasRel || hasKeyboard
             if (!candidate) continue
 
             // ABS 范围（只有 getevent -p 能给出精确 absinfo，这里先占位，读到后用 getevent 覆盖）

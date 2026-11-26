@@ -59,4 +59,16 @@ interface IClickerService {
 
     /** 结束绑定键位捕获 */
     void endKeyCapture() = 11;
+
+    /**
+     * 轨迹用的光标坐标（不受“高级”灵敏度影响），两个 float 打包进一个 long：
+     * 高 32 位 = x 的原始位，低 32 位 = y。
+     */
+    long trailPoint() = 12;
+
+    /**
+     * 无障碍服务过滤到的硬件按键（键码已换算成 evdev/Linux 码）。
+     * 返回 true 表示这个键由 App 使用（绑定键、捕获中），需要把按键吞掉。
+     */
+    boolean hardwareKey(int code, int action) = 13;
 }

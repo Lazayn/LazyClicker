@@ -29,6 +29,7 @@ class ClickerService : IClickerService.Stub {
         private const val TAG = "M3E-Service"
         private const val MANUAL_TIMEOUT_MS = 3_000L
         private const val MAX_HOLD_MS = 120_000L
+        private const val CAPTURE_LEASE_MS = 45_000L
 
         const val METHOD_DEFAULT = 0
         const val METHOD_DBC = 1
@@ -68,9 +69,54 @@ class ClickerService : IClickerService.Stub {
     @Volatile
     private var toggleKey = -1
 
+    /** 是否收到过界面下发的配置；没配过的服务进程不能用默认值冒充用户状态 */
+    @Volatile
+    private var configured = false
+
+    /** 无障碍按键过滤是否已接管键盘；接管后 evdev 不再处理键盘键，避免一次按下切换两次 */
+    @Volatile
+    private var a11yActive = false
+
+    /** 悬浮窗开关键（evdev 键码），-1 表示未绑定 */
+    @Volatile
+    private var overlayKey = -1
+
+    /** 悬浮窗开关键触发计数，App 侧据此开关悬浮窗 */
+    @Volatile
+    private var overlaySeq = 0
+
+    /** 校准键（evdev 键码），-1 表示未绑定 */
+    @Volatile
+    private var calibKey = -1
+
+    /** 校准触发计数 */
+    @Volatile
+    private var calibSeq = 0
+
+    /** 原始相对位移累计（未乘“高级”灵敏度），给轨迹层独立换算用 */
+    @Volatile
+    private var rawMoveX = 0
+
+    @Volatile
+    private var rawMoveY = 0
+
+    /** 轨迹层用的光标（gain 1、不含灵敏度），高级灵敏度为 0 时也会移动 */
+    @Volatile
+    private var trailX = 0f
+
+    @Volatile
+    private var trailY = 0f
+
     /** 是否处于键位捕获 */
     @Volatile
     private var capturing = false
+    /**
+     * 捕获租约：最后一次收到 beginKeyCapture 的时间。
+     * 界面在对话框可见期间会定时续租；界面崩溃/被杀后租约到期，服务端自动结束捕获，
+     * 不会像固定超时那样在用户慢慢按键时把会话掐断。
+     */
+    @Volatile
+    private var captureLeaseAt = 0L
 
     /** 捕获到的键码 */
     @Volatile
@@ -145,6 +191,9 @@ class ClickerService : IClickerService.Stub {
     private var acceleration = true
 
     @Volatile
+    /** 不夹边的原始光标位置：游戏中光标会越过屏幕边界，用它画轨迹才不会撞墙 */
+    private var freeX = 0f
+    private var freeY = 0f
     private var cursorX = 0f
 
     @Volatile
@@ -185,6 +234,10 @@ class ClickerService : IClickerService.Stub {
             applyShellScreenSize()
             cursorX = screenWidth / 2f
             cursorY = screenHeight / 2f
+            freeX = cursorX
+            freeY = cursorY
+            trailX = cursorX
+            trailY = cursorY
             injector = InputInjector()
             if (!injector.available) lastError = injector.error ?: "输入注入不可用"
             ready = true
@@ -217,6 +270,8 @@ class ClickerService : IClickerService.Stub {
             val o = JSONObject(json)
             enabled = o.optBoolean("enabled", true)
             toggleKey = o.optInt("toggleKey", -1).takeIf { it in 1..400 } ?: -1
+            overlayKey = o.optInt("overlayKey", -1).takeIf { it in 1..400 } ?: -1
+            calibKey = o.optInt("calibKey", -1).takeIf { it in 1..400 } ?: -1
             method = when (o.optInt("method", 0)) {
                 METHOD_DBC -> METHOD_DBC
                 METHOD_DC -> METHOD_DC
@@ -261,16 +316,25 @@ class ClickerService : IClickerService.Stub {
             touchCompat = o.optBoolean("touchCompat", false)
             acceleration = o.optBoolean("acceleration", true)
 
+            configured = true
+            // 客户端已重启但还没来得及结束捕获时，租约过期即视为捕获会话结束
+            if (capturing && SystemClock.elapsedRealtime() - captureLeaseAt > CAPTURE_LEASE_MS) {
+                capturing = false
+            }
+            // 只要绑了任意键位就必须保持监听：关闭状态下也要能收到启用键
+            if (capturing || toggleKey > 0 || overlayKey > 0 || calibKey > 0) {
+                ensureMonitor()
+            } else if (enabled) {
+                ensureMonitor()
+            }
             if (!enabled) {
                 mousePressed = false
                 stopLoop()
-            } else {
-                ensureMonitor()
             }
             Log.i(
                 TAG,
                 "configure enabled=$enabled method=$method cps=$minCps-$maxCps " +
-                    "dc=$dcCps/${dcDurMinMs}-${dcDurMaxMs}ms gap=$gapMin-$gapMax toggleKey=$toggleKey"
+                    "dc=$dcCps/${dcDurMinMs}-${dcDurMaxMs}ms gap=$gapMin-$gapMax toggleKey=$toggleKey overlayKey=$overlayKey calibKey=$calibKey"
             )
         } catch (t: Throwable) {
             lastError = "参数解析失败: ${t.message}"
@@ -282,6 +346,10 @@ class ClickerService : IClickerService.Stub {
         // REL 设备没有绝对坐标：先把系统光标挪到屏幕中心，让推算坐标与真实光标对齐
         cursorX = screenWidth / 2f
         cursorY = screenHeight / 2f
+        freeX = cursorX
+        freeY = cursorY
+        trailX = cursorX
+        trailY = cursorY
         injector.moveCursor(cursorX, cursorY)
         manualActive = false
         dcLocked = false
@@ -299,12 +367,24 @@ class ClickerService : IClickerService.Stub {
     }
 
     override fun beginKeyCapture() {
-        capturing = true
-        capturedKey = -1
+        captureLeaseAt = SystemClock.elapsedRealtime()
+        // 重复调用只是续租（对话框可见期间会周期性调用），不能把已经捕获到的键清掉
+        if (!capturing) {
+            capturing = true
+            capturedKey = -1
+        }
+        // 没有任何绑键且总开关关闭时监听器不会启动，捕获阶段必须确保监听存在，否则按什么键都收不到
+        ensureMonitor()
     }
 
     override fun endKeyCapture() {
         capturing = false
+        captureLeaseAt = 0L
+    }
+
+    override fun trailPoint(): Long {
+        return (java.lang.Float.floatToRawIntBits(trailPointX()).toLong() shl 32) or
+            (java.lang.Float.floatToRawIntBits(trailPointY()).toLong() and 0xFFFFFFFFL)
     }
 
     override fun startManualBurst() {
@@ -327,6 +407,10 @@ class ClickerService : IClickerService.Stub {
     override fun resetCursor() {
         cursorX = screenWidth / 2f
         cursorY = screenHeight / 2f
+        freeX = cursorX
+        freeY = cursorY
+        trailX = cursorX
+        trailY = cursorY
         injector.moveCursor(cursorX, cursorY)
     }
 
@@ -336,8 +420,12 @@ class ClickerService : IClickerService.Stub {
 
     override fun statusJson(): String {
         return try {
+            if (capturing && SystemClock.elapsedRealtime() - captureLeaseAt > CAPTURE_LEASE_MS) {
+                capturing = false
+            }
             val json = JSONObject()
             json.put("ready", ready)
+            json.put("configured", configured)
             json.put("uid", Process.myUid())
             json.put("trigger", enabled)
             json.put("clicking", clicking.get())
@@ -346,6 +434,12 @@ class ClickerService : IClickerService.Stub {
             json.put("enabled", enabled)
             json.put("switchSeq", switchSeq)
             json.put("toggleKey", toggleKey)
+            json.put("overlaySeq", overlaySeq)
+            json.put("calibSeq", calibSeq)
+            json.put("rawX", rawMoveX)
+            json.put("rawY", rawMoveY)
+            json.put("trailX", trailPointX().toInt())
+            json.put("trailY", trailPointY().toInt())
             json.put("capturing", capturing)
             json.put("capturedKey", capturedKey)
             json.put("method", when (method) {
@@ -436,12 +530,26 @@ class ClickerService : IClickerService.Stub {
                 if (!manualActive) stopLoop()
             },
             onRelativeMove = { dx, dy ->
-                cursorX = (cursorX + scaledDelta(dx)).coerceIn(0f, (screenWidth - 1).toFloat())
-                cursorY = (cursorY + scaledDelta(dy)).coerceIn(0f, (screenHeight - 1).toFloat())
+                rawMoveX += dx
+                rawMoveY += dy
+                trailX += dx
+                trailY += dy
+                freeX += scaledDelta(dx)
+                freeY += scaledDelta(dy)
+                cursorX = freeX.coerceIn(0f, (screenWidth - 1).toFloat())
+                cursorY = freeY.coerceIn(0f, (screenHeight - 1).toFloat())
             },
             onAbsoluteMove = { _, nx, ny ->
-                if (nx >= 0f) cursorX = (nx * (screenWidth - 1)).coerceIn(0f, (screenWidth - 1).toFloat())
-                if (ny >= 0f) cursorY = (ny * (screenHeight - 1)).coerceIn(0f, (screenHeight - 1).toFloat())
+                if (nx >= 0f) {
+                    freeX = (nx * (screenWidth - 1)).coerceIn(0f, (screenWidth - 1).toFloat())
+                    cursorX = freeX
+                    trailX = cursorX
+                }
+                if (ny >= 0f) {
+                    freeY = (ny * (screenHeight - 1)).coerceIn(0f, (screenHeight - 1).toFloat())
+                    cursorY = freeY
+                    trailY = cursorY
+                }
             },
             onDevicesChanged = { list ->
                 Log.i(TAG, "devices: ${list.joinToString { it.label() }}")
@@ -453,23 +561,64 @@ class ClickerService : IClickerService.Stub {
             onAnyKey = { label ->
                 lastKeyEvent = label
             },
-            onKeyEvent = { code, value ->
-                if (capturing) {
-                    // 键盘按键与鼠标侧键都可绑定（左/右键本身除外，避免与触发冲突）
-                    if (code in 1..255 || code in 275..276 || code == 274) capturedKey = code
-                } else if (toggleKey > 0 && code == toggleKey && value == 1) {
-                    // 绑定键位：按下沿切换总开关，抬起与重复事件忽略
-                    enabled = !enabled
-                    switchSeq++
-                    if (!enabled) {
-                        mousePressed = false
-                        stopLoop()
-                    }
-                }
-            }
+            onKeyEvent = { code, value -> handleKey(code, value, fromAccessibility = false) }
         )
         monitor = m
         m.start()
+    }
+
+    /**
+     * 统一的按键处理入口：evdev 与无障碍过滤都走这里。
+     * [fromAccessibility] 为 true 时说明是无障碍服务送来的键盘事件，evdev 那份不再重复处理。
+     */
+    private fun handleKey(code: Int, value: Int, fromAccessibility: Boolean) {
+        if (!fromAccessibility && a11yActive && code < 200) return
+        if (capturing) {
+            // 键盘按键与鼠标侧键都可绑定（左/右键本身除外，避免与触发冲突）
+            if (code in 1..255 || code in 275..276 || code == 274) capturedKey = code
+        } else if (calibKey > 0 && code == calibKey && value == 1) {
+            // 校准键：光标回中，并通知轨迹层
+            recenterCursor()
+            calibSeq++
+        } else if (overlayKey > 0 && code == overlayKey && value == 1) {
+            // 悬浮窗开关键：只发计数，真正的窗口开关由 App 侧前台服务处理
+            overlaySeq++
+        } else if (toggleKey > 0 && code == toggleKey && value == 1) {
+            // 绑定键位：按下沿切换总开关，抬起与重复事件忽略
+            enabled = !enabled
+            switchSeq++
+            if (!enabled) {
+                mousePressed = false
+                stopLoop()
+            }
+        }
+    }
+
+    override fun hardwareKey(code: Int, action: Int): Boolean {
+        a11yActive = true
+        handleKey(code, action, fromAccessibility = true)
+        return capturing ||
+            (toggleKey > 0 && code == toggleKey) ||
+            (overlayKey > 0 && code == overlayKey) ||
+            (calibKey > 0 && code == calibKey)
+    }
+
+    /** 轨迹优先使用点击所用的光标（sensitivity>0）；灵敏度为 0 时退回独立的光标 */
+    private fun trailPointX(): Float = if (sensitivity > 0f) freeX else trailX
+    private fun trailPointY(): Float = if (sensitivity > 0f) freeY else trailY
+
+    /** 光标回中（校准） */
+    private fun recenterCursor() {
+        cursorX = screenWidth / 2f
+        cursorY = screenHeight / 2f
+        freeX = cursorX
+        freeY = cursorY
+        trailX = cursorX
+        trailY = cursorY
+        try {
+            injector.moveCursor(cursorX, cursorY)
+        } catch (_: Throwable) {
+        }
     }
 
     /**
@@ -621,12 +770,16 @@ class ClickerService : IClickerService.Stub {
 
             nextAt += interval
             val now = SystemClock.elapsedRealtime()
-            if (nextAt <= now) nextAt = now + 1
             val wait = nextAt - now
-            try {
-                Thread.sleep(wait)
-            } catch (_: InterruptedException) {
-                break
+            if (wait > 0) {
+                try {
+                    Thread.sleep(wait)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            } else if (-wait > interval) {
+                // 落后超过一个周期：重新对齐，不补发积压的点击
+                nextAt = now
             }
         }
         measuredCps = 0

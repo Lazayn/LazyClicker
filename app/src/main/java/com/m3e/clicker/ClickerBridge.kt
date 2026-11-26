@@ -2,6 +2,7 @@ package com.m3e.clicker
 
 import android.content.ComponentName
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
@@ -11,7 +12,6 @@ import android.os.SystemClock
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,9 +21,6 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.random.Random
 
 enum class BridgeState {
     CHECKING,
@@ -49,6 +46,8 @@ data class NodeDetail(
 /** 从 UserService 拉回来的运行状态 */
 data class ServiceStatus(
     val ready: Boolean = false,
+    /** 服务端是否已经收到过界面配置；未配置时 enabled 只是默认值，不能当作真实状态 */
+    val configured: Boolean = false,
     val uid: Int = -1,
     val trigger: Boolean = false,
     val clicking: Boolean = false,
@@ -59,6 +58,16 @@ data class ServiceStatus(
     val enabled: Boolean = true,
     val switchSeq: Int = 0,
     val toggleKey: Int = -1,
+    /** 悬浮窗开关键触发计数，每按一次 +1 */
+    val overlaySeq: Int = 0,
+    /** 校准键触发计数 */
+    val calibSeq: Int = 0,
+    /** 原始相对位移累计 */
+    val rawX: Int = 0,
+    val rawY: Int = 0,
+    /** 轨迹层光标（服务侧 gain 1 的估计值） */
+    val trailX: Int = 0,
+    val trailY: Int = 0,
     val capturing: Boolean = false,
     val capturedKey: Int = -1,
     val method: String = "default",
@@ -67,6 +76,12 @@ data class ServiceStatus(
     val injectError: String = "",
     val minCps: Int = 8,
     val maxCps: Int = 12,
+    /** default 模式自己的区间 */
+    val defaultMinCps: Int = 8,
+    val defaultMaxCps: Int = 12,
+    /** DBC 模式自己的区间 */
+    val dbcMinCps: Int = 8,
+    val dbcMaxCps: Int = 12,
     val cursorX: Int = 0,
     val cursorY: Int = 0,
     val width: Int = 1080,
@@ -125,6 +140,7 @@ data class ServiceStatus(
 
                 ServiceStatus(
                     ready = json.optBoolean("ready", false),
+                    configured = json.optBoolean("configured", false),
                     uid = json.optInt("uid", -1),
                     trigger = json.optBoolean("trigger", false),
                     clicking = json.optBoolean("clicking", false),
@@ -135,6 +151,12 @@ data class ServiceStatus(
                     enabled = json.optBoolean("enabled", true),
                     switchSeq = json.optInt("switchSeq", 0),
                     toggleKey = json.optInt("toggleKey", -1),
+                    overlaySeq = json.optInt("overlaySeq", 0),
+                    calibSeq = json.optInt("calibSeq", 0),
+                    rawX = json.optInt("rawX", 0),
+                    rawY = json.optInt("rawY", 0),
+                    trailX = json.optInt("trailX", 0),
+                    trailY = json.optInt("trailY", 0),
                     capturing = json.optBoolean("capturing", false),
                     capturedKey = json.optInt("capturedKey", -1),
                     method = json.optString("method", "default"),
@@ -176,16 +198,27 @@ data class ServiceStatus(
 }
 
 /** 界面参数 */
+@Immutable
 data class ClickerParams(
     /** 总开关（界面上的开关，也可由绑定键位切换） */
     val enabled: Boolean = true,
     /** 绑定键位（evdev 键码），-1 未绑定 */
     val toggleKey: Int = -1,
+    /** 悬浮窗开关键（evdev 键码），-1 未绑定 */
+    val overlayKey: Int = -1,
+    /** 轨迹校准键（evdev 键码），-1 未绑定 */
+    val calibKey: Int = -1,
     /** 左键点击模式：default / dbc / dc */
     val method: String = "default",
     /** 左键默认与 DBC 的基础 CPS 区间（DBC 上限更低，由界面限制） */
     val minCps: Int = 8,
     val maxCps: Int = 12,
+    /** default 模式自己的区间 */
+    val defaultMinCps: Int = 8,
+    val defaultMaxCps: Int = 12,
+    /** DBC 模式自己的区间 */
+    val dbcMinCps: Int = 8,
+    val dbcMaxCps: Int = 12,
     /** 多倍点概率区间（0..100） */
     val multiMin: Int = 20,
     val multiMax: Int = 40,
@@ -213,6 +246,8 @@ fun ClickerParams.toJson(): String {
     return org.json.JSONObject().apply {
         put("enabled", enabled)
         put("toggleKey", toggleKey)
+        put("overlayKey", overlayKey)
+        put("calibKey", calibKey)
         put("method", when (method) {
             "dbc" -> 1
             "dc" -> 2
@@ -247,7 +282,9 @@ class ClickerBridge private constructor(private val appContext: Context) {
     companion object {
         private const val TAG = "M3E-Bridge"
         private const val REQUEST_CODE = 4001
-        private const val SERVICE_VERSION = 7
+        // 用 App 版本号做 Shizuku UserService 的版本标记：
+        // 每次更新 App 都会让旧版本的服务进程被重启，避免残留旧 AIDL/旧逻辑
+        private val SERVICE_VERSION = BuildConfig.VERSION_CODE
 
         @Volatile
         private var instance: ClickerBridge? = null
@@ -271,8 +308,6 @@ class ClickerBridge private constructor(private val appContext: Context) {
     val message = _message.asStateFlow()
 
     /** 无障碍兜底连点是否在运行 */
-    private val _a11yBurst = MutableStateFlow(false)
-    val a11yBurst = _a11yBurst.asStateFlow()
 
     private val serviceArgs: Shizuku.UserServiceArgs = Shizuku.UserServiceArgs(
         ComponentName(appContext.packageName, ClickerService::class.java.name)
@@ -405,12 +440,49 @@ class ClickerBridge private constructor(private val appContext: Context) {
         send { svc -> svc.configureJson(params.toJson()) }
     }
 
+    /**
+     * 服务端当前的总开关状态：按键切换后以服务为准，避免界面用旧快照把它覆盖回去。
+     * 只在服务端确实收到过配置时返回，否则新起的 UserService 会用默认值把界面状态带偏。
+     */
+    fun currentEnabled(): Boolean? {
+        val svc = service ?: return null
+        return try {
+            val st = ServiceStatus.parse(svc.statusJson())
+            if (st.configured) st.enabled else null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun startTrigger(params: ClickerParams) {
         send { svc ->
             svc.configureJson(params.toJson())
             svc.startMouseTrigger()
         }
         ClickerForegroundService.start(appContext)
+    }
+
+    /** 轻量取轨迹光标（不拉整包状态），失败返回 null */
+    fun trailPoint(): Pair<Float, Float>? {
+        val svc = service ?: return null
+        return try {
+            val packed = svc.trailPoint()
+            val x = Float.fromBits((packed shr 32).toInt())
+            val y = Float.fromBits(packed.toInt())
+            if (x.isNaN() || y.isNaN()) null else x to y
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** 无障碍过滤到的硬件按键（evdev 码）：返回 true 表示按键已被使用，需要吞掉 */
+    fun hardwareKey(code: Int, action: Int): Boolean {
+        val svc = service ?: return false
+        return try {
+            svc.hardwareKey(code, action)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     fun beginKeyCapture() = send { it.beginKeyCapture() }
@@ -421,58 +493,11 @@ class ClickerBridge private constructor(private val appContext: Context) {
         send { it.stopMouseTrigger() }
     }
 
-    fun startManual() = send { it.startManualBurst() }
-
     fun stopManual() = send { it.stopManualBurst() }
 
     fun clickOnce() = send { it.clickOnce() }
 
     fun resetCursor() = send { it.resetCursor() }
-
-    // ---------------------------------------------------------- 无障碍兜底
-
-    fun accessibilityReady(): Boolean = SystemAccess.isAccessibilityEnabled(appContext)
-
-    private var a11yJob: Job? = null
-
-    /** 没有 Shizuku 时，用无障碍手势在固定坐标连点（兜底方案，不是鼠标左键） */
-    fun startAccessibilityBurst(params: ClickerParams): Boolean {
-        if (!ClickerAccessibilityService.isConnected()) {
-            _message.value = "无障碍服务未连接，请先在系统设置里开启"
-            return false
-        }
-        a11yJob?.cancel()
-        _a11yBurst.value = true
-        a11yJob = scope.launch {
-            try {
-                while (isActive && _a11yBurst.value) {
-                    ClickerAccessibilityService.tap(
-                        params.fixedX.toFloat(),
-                        params.fixedY.toFloat()
-                    )
-                    val cps = if (params.minCps == params.maxCps) {
-                        params.minCps
-                    } else {
-                        Random.nextInt(min(params.minCps, params.maxCps), max(params.minCps, params.maxCps) + 1)
-                    }
-                    delay((1000L / max(cps, 1)).coerceAtLeast(1L))
-                }
-            } finally {
-                _a11yBurst.value = false
-            }
-        }
-        return true
-    }
-
-    fun stopAccessibilityBurst() {
-        _a11yBurst.value = false
-        a11yJob?.cancel()
-        a11yJob = null
-    }
-
-    fun accessibilityTap(params: ClickerParams) {
-        ClickerAccessibilityService.tap(params.fixedX.toFloat(), params.fixedY.toFloat())
-    }
 
     // ---------------------------------------------------------- 杂项
 

@@ -8,14 +8,14 @@ plugins {
 
 android {
     namespace = "com.m3e.clicker"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.m3e.clicker"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "2.0.2"
+        versionCode = 57
+        versionName = "3.6.2"
     }
 
     signingConfigs {
@@ -55,12 +55,30 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    // 出包时去掉只在开发期有用的东西：依赖元数据、VCS 信息、许可证/模块描述等
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
     packaging {
         resources.excludes += setOf(
             "/META-INF/{AL2.0,LGPL2.1}",
             "META-INF/*.kotlin_module",
             "DebugProbesKt.bin",
             "META-INF/*.version",
+            "META-INF/LICENSE*",
+            "META-INF/NOTICE*",
+            "META-INF/**/*.txt",
+            "META-INF/**/LICENSE*",
+            "META-INF/**/NOTICE*",
+            "META-INF/version-control-info.textproto",
+            "META-INF/versions/**",
+            "kotlin/**",
+            "**/*.kotlin_builtins",
+            "kotlin-tooling-metadata.json",
+            "**/*.pro",
+            "**/*.md",
         )
     }
 
@@ -90,11 +108,11 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.compose.ui:ui:$composeUi")
     implementation("androidx.compose.ui:ui-graphics:$composeUi")
-    implementation("androidx.compose.ui:ui-tooling-preview:$composeUi")
     implementation("androidx.compose.foundation:foundation:$composeFoundation")
     implementation("androidx.compose.material:material-icons-core:1.7.8")
     implementation("androidx.compose.material3:material3:$composeMaterial3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("io.github.feice11:mochi-compose:0.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling:$composeUi")
 }

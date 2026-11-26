@@ -30,9 +30,4 @@ object Shell {
         return builder.toString()
     }
 
-    fun hasGetevent(): Boolean = try {
-        java.io.File("/system/bin/getevent").exists()
-    } catch (_: Throwable) {
-        false
-    }
 }

@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">LazyClicker</string>
-    <string name="a11y_service_label">LazyClicker · 备用点击</string>
     <string name="a11y_service_desc">没有 Shizuku 时，用于在固定坐标输出点击手势（备用通道）。不读取任何界面内容。</string>
+    <string name="key_filter_description">用于拦截你绑定的硬件按键来开关连点。只读取按键本身，不读取屏幕内容。</string>
 </resources>

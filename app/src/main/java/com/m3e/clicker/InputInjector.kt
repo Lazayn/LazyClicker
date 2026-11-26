@@ -159,36 +159,6 @@ class InputInjector {
 
     // ------------------------------------------------------------ 输出键值
 
-    /** 输出一次键值（DOWN + UP） */
-    fun pressKey(keyCode: Int): Boolean {
-        if (!available) return false
-        if (keyCode <= 0) return false
-        val downTime = SystemClock.uptimeMillis()
-        val okDown = sendKey(keyCode, KeyEvent.ACTION_DOWN, downTime)
-        val okUp = sendKey(keyCode, KeyEvent.ACTION_UP, SystemClock.uptimeMillis())
-        return okDown && okUp
-    }
-
-    fun keyDown(keyCode: Int): Boolean =
-        sendKey(keyCode, KeyEvent.ACTION_DOWN, SystemClock.uptimeMillis())
-
-    fun keyUp(keyCode: Int): Boolean =
-        sendKey(keyCode, KeyEvent.ACTION_UP, SystemClock.uptimeMillis())
-
-    private fun sendKey(keyCode: Int, action: Int, eventTime: Long): Boolean {
-        return try {
-            val event = KeyEvent(eventTime, eventTime, action, keyCode, 0)
-            try {
-                event.source = InputDevice.SOURCE_KEYBOARD
-            } catch (_: Throwable) {
-            }
-            send(event)
-        } catch (t: Throwable) {
-            error = "KeyEvent 构造失败: ${t.message}"
-            false
-        }
-    }
-
     // ------------------------------------------------------------ 输出鼠标按键
 
     fun click(x: Float, y: Float, touchCompat: Boolean, secondary: Boolean = false): Boolean {

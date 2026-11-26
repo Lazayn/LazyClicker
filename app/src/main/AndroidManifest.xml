@@ -11,8 +11,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
+        android:name=".ClickerApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -40,21 +42,33 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="continuously inject mouse left-button events while listening to the physical mouse" />
+                android:value="remote mouse clicker" />
         </service>
 
-        <!-- 无障碍备用通道：没有 Shizuku 时仍可手动连点 -->
+        <!-- 幽灵模式：同一套前台服务逻辑跑在 :ghost 进程，清后台后仍存活 -->
         <service
-            android:name=".ClickerAccessibilityService"
+            android:name=".ClickerGhostService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":ghost"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="remote mouse clicker ghost host" />
+        </service>
+
+        <!-- 无障碍按键过滤（参考 KeyMapper）：系统层拦键盘，绑键不依赖 evdev/Shizuku -->
+        <service
+            android:name=".KeyFilterService"
             android:exported="true"
-            android:label="@string/a11y_service_label"
+            android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
+                android:resource="@xml/key_filter_config" />
         </service>
 
         <!-- Shizuku 客户端 provider，权限请求与 binder 转发都依赖它 -->
