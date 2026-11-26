@@ -27,7 +27,13 @@
 * 补点太高会卡
 * 开挂违法。
 
-##
+## 参考仓库
+
+https://github.com/DoomVoss/BASpark
+https://github.com/jordond/MaterialKolor
+https://github.com/feice11/mochi-compose
+https://github.com/keymapperorg/KeyMapper
+https://github.com/RikkaApps/Shizuku-API
 
 ### 放个老安卓图标
 
