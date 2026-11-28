@@ -8,10 +8,9 @@
 
 - 还可以的安卓autoclicker，输出的是左键，以及非常牛逼的cursor track
 
-- 建议系统版本: android 12
+- 建议系统版本: android 13
 
-- 最低系统版本: android 10 (能使用shizuku的最低版本,也就是无线调试功能刚出的版本)
-
+- 最低系统版本: android 11
 - 有些设备可能在游戏里会识别成触屏(万一是版本问题呢xd)
 
 
